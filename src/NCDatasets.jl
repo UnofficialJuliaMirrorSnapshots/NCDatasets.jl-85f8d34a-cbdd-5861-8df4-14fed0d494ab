@@ -1,10 +1,6 @@
-VERSION < v"0.7.0-beta2.199" && __precompile__()
-
 module NCDatasets
-if VERSION >= v"0.7.0-beta.0"
-    using Dates
-    using Printf
-end
+using Dates
+using Printf
 
 using Base
 using Missings
@@ -574,19 +570,28 @@ defDim(ds,"lon",100)
 
 This defines the dimension `lon` with the size 100.
 """
-defDim(ds::Dataset,name,len) = nc_def_dim(ds.ncid,name,
-                                          (isinf(len) ? NC_UNLIMITED : len))
+function defDim(ds::Dataset,name,len)
+    defmode(ds.ncid,ds.isdefmode) # make sure that the file is in define mode
+    dimid = nc_def_dim(ds.ncid,name,(isinf(len) ? NC_UNLIMITED : len))
+    return nothing
+end
 
 """
     defVar(ds::Dataset,name,vtype,dimnames; kwargs...)
     defVar(ds::Dataset,name,data,dimnames; kwargs...)
 
 Define a variable with the name `name` in the dataset `ds`.  `vtype` can be
-Julia types in the table below (with the corresponding NetCDF type). Instead of
-providing the variable type one can directly give also the data `data` which
-will be used to fill the NetCDF variable. The parameter `dimnames` is a tuple with the
-names of the dimension.  For scalar this parameter is the empty tuple `()`.
+Julia types in the table below (with the corresponding NetCDF type). The
+parameter `dimnames` is a tuple with the names of the dimension.  For scalar
+this parameter is the empty tuple `()`.
 The variable is returned (of the type CFVariable).
+
+
+Instead of
+providing the variable type one can directly give also the data `data` which
+will be used to fill the NetCDF variable. In this case, the dimensions with
+the appropriate size will be created as required using the names in `dimnames`.
+
 
 !!! note
 
@@ -989,6 +994,7 @@ function Base.getindex(v::Variable,indexes::Int...)
 end
 
 function Base.setindex!(v::Variable{T,N},data,indexes::Int...) where N where T
+    @debug "$(@__LINE__)"
     datamode(v.ncid,v.isdefmode)
     # use zero-based indexes and reversed order
     nc_put_var1(v.ncid,v.varid,[i-1 for i in indexes[ndims(v):-1:1]],T(data))
@@ -1011,6 +1017,7 @@ function Base.getindex(v::Variable{T,N},indexes::Colon...) where {T,N}
 end
 
 function Base.setindex!(v::Variable{T,N},data::T,indexes::Colon...) where {T,N}
+    @debug "setindex! colon $data"
     datamode(v.ncid,v.isdefmode) # make sure that the file is in data mode
     tmp = fill(data,size(v))
     #@show "here number",indexes,size(v),fill(data,size(v))
@@ -1020,6 +1027,7 @@ end
 
 # call to v .= 123
 function Base.setindex!(v::Variable{T,N},data::Number) where {T,N}
+    @debug "setindex! $data"
     datamode(v.ncid,v.isdefmode) # make sure that the file is in data mode
     tmp = fill(convert(T,data),size(v))
     #@show "here number",indexes,size(v),tmp
@@ -1136,13 +1144,9 @@ function Base.getindex(v::Variable,indexes::Union{Int,Colon,UnitRange{Int},StepR
     ind,squeezedim = normalizeindexes(size(v),indexes)
 
     data = v[ind...]
-    # squeeze any dimension which was indexed with a scalar
+    # drop any dimension which was indexed with a scalar
     if any(squeezedim)
-        return @static if VERSION >= v"0.7.0-beta2.188"
-            dropdims(data,dims=(findall(squeezedim)...,))
-        else
-            squeeze(data,dims=(findall(squeezedim)...,))
-        end
+        return dropdims(data,dims=(findall(squeezedim)...,))
     else
         return data
     end
@@ -1331,8 +1335,6 @@ end
 
 
 function Base.setindex!(v::CFVariable,data::Union{T,Array{T,N}},indexes::Union{Int,Colon,UnitRange{Int},StepRange{Int,Int}}...) where N where T <: Union{AbstractCFDateTime,DateTime,Union{Missing,DateTime}}
-
-    #@show "data-",typeof(data)
     attnames = keys(v.attrib)
     units =
         if "units" in attnames
@@ -1352,28 +1354,6 @@ function Base.setindex!(v::CFVariable,data::Union{T,Array{T,N}},indexes::Union{I
     throw(NetCDFError(-1, "time unit ('$units') of the variable $(name(v)) does not include the word ' since '"))
 end
 
-@static if VERSION < v"0.7"
-    function Base.setindex!(v::CFVariable,data::T,indexes::Union{Int,Colon,UnitRange{Int},StepRange{Int,Int}}...) where T <: Union{AbstractCFDateTime,DateTime,Union{Missing,DateTime}}
-
-        attnames = keys(v.attrib)
-        units =
-            if "units" in attnames
-                v.attrib["units"]
-            else
-                @debug "set time units to $CFTime.DEFAULT_TIME_UNITS"
-                v.attrib["units"] = CFTime.DEFAULT_TIME_UNITS
-                CFTime.DEFAULT_TIME_UNITS
-            end
-
-        if occursin(" since ",units)
-            calendar = get(v.attrib,"calendar","standard")
-            v[indexes...] = timeencode(data,units,calendar)
-            return data
-        end
-
-        throw(NetCDFError(-1, "time unit ('$units') of the variable $(name(v)) does not include the word ' since '"))
-    end
-end
 
 function transform(v,offset,scale)
     if offset !== nothing
@@ -1482,18 +1462,12 @@ name `temperature`.
 Base.haskey(a::NCIterable,name::AbstractString) = name in keys(a)
 Base.in(name::AbstractString,a::NCIterable) = name in keys(a)
 
-@static if VERSION >= v"0.7.0-beta.0"
-    function Base.iterate(a::NCIterable, state = keys(a))
-        if length(state) == 0
-            return nothing
-        end
-
-        return (state[1] => a[popfirst!(state)], state)
+function Base.iterate(a::NCIterable, state = keys(a))
+    if length(state) == 0
+        return nothing
     end
-else
-    Base.start(a::NCIterable) = keys(a)
-    Base.done(a::NCIterable,state) = length(state) == 0
-    Base.next(a::NCIterable,state) = (state[1] => a[popfirst!(state)], state)
+
+    return (state[1] => a[popfirst!(state)], state)
 end
 
 """
@@ -1650,16 +1624,7 @@ function nomissing(da::Array{Union{T,Missing},N}) where {T,N}
         error("arrays contains missing values (values equal to the fill values attribute in the NetCDF file)")
     end
 
-    if VERSION >= v"0.7.0-beta.0"
-         if isempty(da)
-            return Array{T,N}([])
-         else
-            return replace(da, missing => da[1])
-         end
-    else
-        # Illegal instruction (core dumped) in Julia 1.0.1
-        return Array{T,N}(da)
-    end
+    return Array{T,N}(da)
 end
 
 """
@@ -1669,13 +1634,7 @@ Retun the values of the array `da` of type `Array{Union{T,Missing},N}`
 as a regular Julia array `a` by replacing all missing value by `value`.
 """
 function nomissing(da::Array{Union{T,Missing},N},value) where {T,N}
-    if VERSION >= v"0.7.0-beta.0"
-        return replace(da, missing => T(value))
-    else
-        tmp = fill(T(value),size(da))
-        tmp[.!ismissing.(da)] = da[.!ismissing.(da)]
-        return tmp
-    end
+    return replace(da, missing => T(value))
 end
 
 
