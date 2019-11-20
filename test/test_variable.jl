@@ -6,6 +6,9 @@ using NCDatasets
 sz = (4,5)
 filename = tempname()
 #filename = "/tmp/test-6.nc"
+#if isfile(filename)
+#    rm(filename)
+#end
 
 # The mode "c" stands for creating a new file (clobber)
 NCDatasets.Dataset(filename,"c") do ds
@@ -72,13 +75,6 @@ Dataset(filename,"c") do ds
     @test ds.dim["lon"] == sz[1]
     @test ds.dim["lat"] == sz[2]
 
-    # test Union{Missing,T}
-    defVar(ds,"foo",[missing,1.,2.],("dim",), fillvalue = -9999.)
-    @test isequal(ds["foo"][:], [missing,1.,2.])
-
-    defVar(ds,"scalar",123.)
-    @test ds["scalar"][:] == 123.
-
     # load in-place
     data2 = similar(data)
     NCDatasets.load!(ds["temp"].var,data2,:,:)
@@ -87,8 +83,46 @@ Dataset(filename,"c") do ds
     data2 = zeros(eltype(data),sz[1],2)
     NCDatasets.load!(ds["temp"].var,data2,:,1:2)
     @test data2 == data[:,1:2]
-end
 
+    # test Union{Missing,T}
+    defVar(ds,"foo",[missing,1.,2.],("dim",), fillvalue = -9999.)
+    @test fillvalue(ds["foo"]) == -9999.
+    @test isequal(ds["foo"][:], [missing,1.,2.])
+
+    # test Union{Missing,T} and default fill value (issue #38)
+    defVar(ds,"foo_default_fill_value",[missing,1.,2.],("dim",))
+    @test fillvalue(ds["foo_default_fill_value"]) == NC_FILL_DOUBLE
+    @test isequal(ds["foo_default_fill_value"][:], [missing,1.,2.])
+
+
+    for DT in [DateTime,
+               DateTimeStandard,
+               DateTimeJulian,
+               DateTimeProlepticGregorian,
+               DateTimeAllLeap,
+               DateTimeNoLeap,
+               DateTime360Day
+               ]
+
+        # test DateTime et al., array
+        data_dt = [DT(2000,1,1),DT(2000,1,2),DT(2000,1,3)]
+        defVar(ds,"foo_$(DT)",data_dt,("dim",))
+        data_dt2 = ds["foo_$(DT)"][:]
+        @test isequal(convert.(DT,data_dt2), data_dt)
+
+        # test DateTime et al. with missing array
+        data_dt = [missing,DT(2000,1,2),DT(2000,1,3)]
+        defVar(ds,"foo_$(DT)_with_fill_value",data_dt,("dim",))
+
+        data_dt2 = ds["foo_$(DT)_with_fill_value"][:]
+        @test ismissing(data_dt2[1])
+
+        @test isequal(convert.(DT,data_dt2[2:end]), data_dt[2:end])
+    end
+
+    defVar(ds,"scalar",123.)
+    @test ds["scalar"][:] == 123.
+end
 
 # issue 23
 # return type using CartesianIndex
@@ -125,3 +159,4 @@ Dataset("temp1.nc", "c") do ds
       defDim(ds, "y", length(y))
       defVar(ds, "y", y, ("y",))
 end
+
